@@ -228,36 +228,44 @@ class FeatureGroup {
     return bin_data_->GetIterator(min_bin, max_bin, most_freq_bin);
   }
 
-  inline data_size_t Split(
-    int sub_feature,
-    const uint32_t* threshold,
-    int num_threshold,
-    bool default_left,
-    data_size_t* data_indices, data_size_t num_data,
-    data_size_t* lte_indices, data_size_t* gt_indices) const {
-    uint32_t default_bin = bin_mappers_[sub_feature]->GetDefaultBin();
-    uint32_t most_freq_bin = bin_mappers_[sub_feature]->GetMostFreqBin();
+  inline void InitSplit() const {
     if (!is_multi_val_) {
-      uint32_t min_bin = bin_offsets_[sub_feature];
-      uint32_t max_bin = bin_offsets_[sub_feature + 1] - 1;
-      if (bin_mappers_[sub_feature]->bin_type() == BinType::NumericalBin) {
-        auto missing_type = bin_mappers_[sub_feature]->missing_type();
-        return bin_data_->Split(min_bin, max_bin, default_bin, most_freq_bin, missing_type, default_left,
-          *threshold, data_indices, num_data, lte_indices, gt_indices);
-      } else {
-        return bin_data_->SplitCategorical(min_bin, max_bin, most_freq_bin, threshold, num_threshold, data_indices, num_data, lte_indices, gt_indices);
+      for (int i = 0; i < num_feature_; ++i) {
+        uint32_t default_bin = bin_mappers_[i]->GetDefaultBin();
+        uint32_t most_freq_bin = bin_mappers_[i]->GetMostFreqBin();
+        uint32_t min_bin = bin_offsets_[i];
+        uint32_t max_bin = bin_offsets_[i + 1] - 1;
+        bin_data_->InitSplit(num_feature_, i, bin_mappers_[i]->bin_type(),
+                             min_bin, max_bin, default_bin, most_freq_bin,
+                             bin_mappers_[i]->missing_type());
       }
     } else {
-      int addi = bin_mappers_[sub_feature]->GetMostFreqBin() == 0 ? 0 : 1;
-      uint32_t min_bin = 1;
-      uint32_t max_bin = bin_mappers_[sub_feature]->num_bin() - 1 + addi;
-      if (bin_mappers_[sub_feature]->bin_type() == BinType::NumericalBin) {
-        auto missing_type = bin_mappers_[sub_feature]->missing_type();
-        return multi_bin_data_[sub_feature]->Split(min_bin, max_bin, default_bin, most_freq_bin, missing_type, default_left,
-          *threshold, data_indices, num_data, lte_indices, gt_indices);
-      } else {
-        return multi_bin_data_[sub_feature]->SplitCategorical(min_bin, max_bin, most_freq_bin, threshold, num_threshold, data_indices, num_data, lte_indices, gt_indices);
+      for (int i = 0; i < num_feature_; ++i) {
+        uint32_t default_bin = bin_mappers_[i]->GetDefaultBin();
+        uint32_t most_freq_bin = bin_mappers_[i]->GetMostFreqBin();
+        int addi = bin_mappers_[i]->GetMostFreqBin() == 0 ? 0 : 1;
+        uint32_t min_bin = 1;
+        uint32_t max_bin = bin_mappers_[i]->num_bin() - 1 + addi;
+        multi_bin_data_[i]->InitSplit(
+            1, 0, bin_mappers_[i]->bin_type(), min_bin, max_bin, default_bin,
+            most_freq_bin, bin_mappers_[i]->missing_type());
       }
+    }
+  }
+
+  inline data_size_t Split(int sub_feature, const uint32_t* threshold,
+                           int num_threshold, bool default_left,
+                           const data_size_t* data_indices,
+                           data_size_t num_data, data_size_t* lte_indices,
+                           data_size_t* gt_indices) const {
+    if (!is_multi_val_) {
+      return bin_data_->Split(sub_feature, threshold, num_threshold,
+                              default_left, data_indices, num_data, lte_indices,
+                              gt_indices);
+    } else {
+      return multi_bin_data_[sub_feature]->Split(
+          0, threshold, num_threshold, default_left, data_indices, num_data,
+          lte_indices, gt_indices);
     }
   }
 

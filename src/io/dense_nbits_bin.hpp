@@ -136,122 +136,160 @@ class Dense4bitsBin : public Bin {
     ConstructHistogramInner<false, false, false>(nullptr, start, end, ordered_gradients, nullptr, out);
   }
 
-  data_size_t Split(
-    uint32_t min_bin, uint32_t max_bin, uint32_t default_bin, uint32_t most_freq_bin, MissingType missing_type, bool default_left,
-    uint32_t threshold, data_size_t* data_indices, data_size_t num_data,
-    data_size_t* lte_indices, data_size_t* gt_indices) const override {
-    if (num_data <= 0) { return 0; }
-    uint8_t th = static_cast<uint8_t>(threshold + min_bin);
-    const uint8_t minb = static_cast<uint8_t>(min_bin);
-    const uint8_t maxb = static_cast<uint8_t>(max_bin);
-    uint8_t t_zero_bin = static_cast<uint8_t>(min_bin + default_bin);
-    uint8_t t_most_freq_bin = static_cast<uint8_t>(min_bin + most_freq_bin);
-    if (most_freq_bin == 0) {
-      th -= 1;
-      t_zero_bin -= 1;
-      t_most_freq_bin -= 1;
+  void InitSplit(int num_features, int cur_feature, BinType bin_type,
+                 uint32_t min_bin, uint32_t max_bin, uint32_t default_bin,
+                 uint32_t most_freq_bin,
+                 MissingType missing_type) const override {
+    if (split_funcs_.size() < static_cast<size_t>(num_features)) {
+      split_funcs_.resize(num_features);
     }
+    if (bin_type == BinType::CategoricalBin) {
+      split_funcs_[cur_feature] =
+          [=](const uint32_t* threshold, int num_threshold, bool,
+              const data_size_t* data_indices, data_size_t num_data,
+              data_size_t* lte_indices, data_size_t* gt_indices) {
+            data_size_t lte_count = 0;
+            data_size_t gt_count = 0;
+            data_size_t* default_indices = gt_indices;
+            data_size_t* default_count = &gt_count;
+            if (Common::FindInBitset(threshold, num_threshold, most_freq_bin)) {
+              default_indices = lte_indices;
+              default_count = &lte_count;
+            }
+            for (data_size_t i = 0; i < num_data; ++i) {
+              const data_size_t idx = data_indices[i];
+              const uint32_t bin = (data_[idx >> 1] >> ((idx & 1) << 2)) & 0xf;
+              if (bin < min_bin || bin > max_bin) {
+                default_indices[(*default_count)++] = idx;
+              } else if (Common::FindInBitset(threshold, num_threshold,
+                                              bin - min_bin)) {
+                lte_indices[lte_count++] = idx;
+              } else {
+                gt_indices[gt_count++] = idx;
+              }
+            }
+            return lte_count;
+          };
+    }
+    SplitHelper<uint8_t> helper;
+    helper.min_bin = static_cast<uint8_t>(min_bin);
+    helper.max_bin = static_cast<uint8_t>(max_bin);
+    bool most_freq_bin_is_zero_bin = false;
+    bool most_freq_bin_is_na = false;
+    helper.offset = 0;
+    if (most_freq_bin == 0) {
+      helper.default_bin = static_cast<uint8_t>(min_bin - 1 + default_bin);
+      helper.most_freq_bin = static_cast<uint8_t>(min_bin - 1 + most_freq_bin);
+      helper.offset = 1;
+    } else {
+      helper.default_bin = static_cast<uint8_t>(min_bin + default_bin);
+      helper.most_freq_bin = static_cast<uint8_t>(min_bin + most_freq_bin);
+    }
+    if (missing_type == MissingType::NaN &&
+        helper.most_freq_bin == helper.max_bin) {
+      most_freq_bin_is_na = true;
+    }
+    if (most_freq_bin == default_bin) {
+      most_freq_bin_is_zero_bin = true;
+    }
+    if (missing_type == MissingType::None) {
+      split_funcs_[cur_feature] =
+          [=](const uint32_t* threshold, int, bool default_left,
+              const data_size_t* data_indices, data_size_t num_data,
+              data_size_t* lte_indices, data_size_t* gt_indices) {
+            return this->Split<MissingType::None, false, false>(
+                helper, default_left, *threshold, data_indices, num_data,
+                lte_indices, gt_indices);
+          };
+    } else if (missing_type == MissingType::Zero) {
+      if (most_freq_bin_is_zero_bin) {
+        split_funcs_[cur_feature] =
+            [=](const uint32_t* threshold, int, bool default_left,
+                const data_size_t* data_indices, data_size_t num_data,
+                data_size_t* lte_indices, data_size_t* gt_indices) {
+              return this->Split<MissingType::Zero, true, false>(
+                  helper, default_left, *threshold, data_indices, num_data,
+                  lte_indices, gt_indices);
+            };
+      } else {
+        split_funcs_[cur_feature] =
+            [=](const uint32_t* threshold, int, bool default_left,
+                const data_size_t* data_indices, data_size_t num_data,
+                data_size_t* lte_indices, data_size_t* gt_indices) {
+              return this->Split<MissingType::Zero, false, false>(
+                  helper, default_left, *threshold, data_indices, num_data,
+                  lte_indices, gt_indices);
+            };
+      }
+
+    } else if (missing_type == MissingType::NaN) {
+      if (most_freq_bin_is_na) {
+        split_funcs_[cur_feature] =
+            [=](const uint32_t* threshold, int, bool default_left,
+                const data_size_t* data_indices, data_size_t num_data,
+                data_size_t* lte_indices, data_size_t* gt_indices) {
+              return this->Split<MissingType::NaN, false, true>(
+                  helper, default_left, *threshold, data_indices, num_data,
+                  lte_indices, gt_indices);
+            };
+      } else {
+        split_funcs_[cur_feature] =
+            [=](const uint32_t* threshold, int, bool default_left,
+                const data_size_t* data_indices, data_size_t num_data,
+                data_size_t* lte_indices, data_size_t* gt_indices) {
+              return this->Split<MissingType::NaN, false, false>(
+                  helper, default_left, *threshold, data_indices, num_data,
+                  lte_indices, gt_indices);
+            };
+      }
+    }
+  }
+
+  template <MissingType TYPE, bool most_freq_bin_is_zero_bin,
+            bool most_freq_bin_is_na>
+  data_size_t Split(const SplitHelper<uint8_t>& helper, bool default_left,
+                    uint32_t threshold, const data_size_t* data_indices,
+                    data_size_t num_data, data_size_t* lte_indices,
+                    data_size_t* gt_indices) const {
+    uint8_t th =
+        static_cast<uint8_t>(threshold + helper.min_bin - helper.offset);
     data_size_t lte_count = 0;
     data_size_t gt_count = 0;
     data_size_t* default_indices = gt_indices;
     data_size_t* default_count = &gt_count;
     data_size_t* missing_default_indices = gt_indices;
     data_size_t* missing_default_count = &gt_count;
-    if (most_freq_bin <= threshold) {
+    if (helper.most_freq_bin <= th) {
       default_indices = lte_indices;
       default_count = &lte_count;
     }
-    if (missing_type == MissingType::NaN) {
+    if (TYPE != MissingType::None) {
       if (default_left) {
         missing_default_indices = lte_indices;
         missing_default_count = &lte_count;
       }
-      if (t_most_freq_bin == maxb) {
-        for (data_size_t i = 0; i < num_data; ++i) {
-          const data_size_t idx = data_indices[i];
-          const uint8_t bin = (data_[idx >> 1] >> ((idx & 1) << 2)) & 0xf;
-          if (t_most_freq_bin == bin || bin < minb || bin > maxb) {
-            missing_default_indices[(*missing_default_count)++] = idx;
-          } else if (bin > th) {
-            gt_indices[gt_count++] = idx;
-          } else {
-            lte_indices[lte_count++] = idx;
-          }
-        }
-      } else {
-        for (data_size_t i = 0; i < num_data; ++i) {
-          const data_size_t idx = data_indices[i];
-          const uint8_t bin = (data_[idx >> 1] >> ((idx & 1) << 2)) & 0xf;
-          if (bin == maxb) {
-            missing_default_indices[(*missing_default_count)++] = idx;
-          } else if (bin < minb || bin > maxb || t_most_freq_bin == bin) {
-            default_indices[(*default_count)++] = idx;
-          } else if (bin > th) {
-            gt_indices[gt_count++] = idx;
-          } else {
-            lte_indices[lte_count++] = idx;
-          }
-        }
-      }
-    } else {
-      if ((default_left && missing_type == MissingType::Zero)
-          || (default_bin <= threshold && missing_type != MissingType::Zero)) {
-        missing_default_indices = lte_indices;
-        missing_default_count = &lte_count;
-      }
-      if (default_bin == most_freq_bin) {
-        for (data_size_t i = 0; i < num_data; ++i) {
-          const data_size_t idx = data_indices[i];
-          const uint8_t bin = (data_[idx >> 1] >> ((idx & 1) << 2)) & 0xf;
-          if (bin < minb || bin > maxb || t_most_freq_bin == bin) {
-            missing_default_indices[(*missing_default_count)++] = idx;
-          } else if (bin > th) {
-            gt_indices[gt_count++] = idx;
-          } else {
-            lte_indices[lte_count++] = idx;
-          }
-        }
-      } else {
-        for (data_size_t i = 0; i < num_data; ++i) {
-          const data_size_t idx = data_indices[i];
-          const uint8_t bin = (data_[idx >> 1] >> ((idx & 1) << 2)) & 0xf;
-          if (bin == t_zero_bin) {
-            missing_default_indices[(*missing_default_count)++] = idx;
-          } else if (bin < minb || bin > maxb || t_most_freq_bin == bin) {
-            default_indices[(*default_count)++] = idx;
-          } else if (bin > th) {
-            gt_indices[gt_count++] = idx;
-          } else {
-            lte_indices[lte_count++] = idx;
-          }
-        }
-      }
-    }
-    return lte_count;
-  }
-
-  data_size_t SplitCategorical(
-    uint32_t min_bin, uint32_t max_bin, uint32_t most_freq_bin,
-    const uint32_t* threshold, int num_threahold, data_size_t* data_indices, data_size_t num_data,
-    data_size_t* lte_indices, data_size_t* gt_indices) const override {
-    if (num_data <= 0) { return 0; }
-    data_size_t lte_count = 0;
-    data_size_t gt_count = 0;
-    data_size_t* default_indices = gt_indices;
-    data_size_t* default_count = &gt_count;
-    if (Common::FindInBitset(threshold, num_threahold, most_freq_bin)) {
-      default_indices = lte_indices;
-      default_count = &lte_count;
     }
     for (data_size_t i = 0; i < num_data; ++i) {
       const data_size_t idx = data_indices[i];
-      const uint32_t bin = (data_[idx >> 1] >> ((idx & 1) << 2)) & 0xf;
-      if (bin < min_bin || bin > max_bin) {
-        default_indices[(*default_count)++] = idx;
-      } else if (Common::FindInBitset(threshold, num_threahold, bin - min_bin)) {
-        lte_indices[lte_count++] = idx;
-      } else {
+      const uint8_t bin = (data_[idx >> 1] >> ((idx & 1) << 2)) & 0xf;
+      if (TYPE == MissingType::Zero && !most_freq_bin_is_zero_bin) {
+        if (bin == helper.default_bin) {
+          missing_default_indices[(*missing_default_count)++] = idx;
+          continue;
+        }
+      }
+      if (helper.most_freq_bin == bin || bin < helper.min_bin ||
+          bin > helper.max_bin) {
+        if ((TYPE == MissingType::NaN && most_freq_bin_is_na) ||
+            (TYPE == MissingType::Zero && most_freq_bin_is_zero_bin)) {
+          missing_default_indices[(*missing_default_count)++] = idx;
+        } else {
+          default_indices[(*default_count)++] = idx;
+        }
+      } else if (bin > th) {
         gt_indices[gt_count++] = idx;
+      } else {
+        lte_indices[lte_count++] = idx;
       }
     }
     return lte_count;

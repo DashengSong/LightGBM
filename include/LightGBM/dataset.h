@@ -535,6 +535,12 @@ class Dataset {
 
   void FixHistogram(int feature_idx, double sum_gradient, double sum_hessian, hist_t* data) const;
 
+  inline void InitSplit() const {
+    for (int i = 0; i < num_groups_; ++i) {
+      feature_groups_[i]->InitSplit();
+    }
+  }
+
   inline data_size_t Split(int feature,
                            const uint32_t* threshold, int num_threshold,  bool default_left,
                            data_size_t* data_indices, data_size_t num_data,
